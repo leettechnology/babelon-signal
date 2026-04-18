@@ -2,11 +2,14 @@
   "name": "babelon-signal",
   "version": "1.0.0",
   "type": "module",
+  "description": "BabelOn signaling server with Twilio TURN and NDA email",
   "main": "server.js",
-  "dependencies": {
-    "ws": "^8.18.0"
-  },
   "scripts": {
     "start": "node server.js"
+  },
+  "dependencies": {
+    "nodemailer": "^6.9.14",
+    "twilio": "^5.3.6",
+    "ws": "^8.18.0"
   }
 }
