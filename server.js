@@ -355,6 +355,23 @@ const server = http.createServer(async (req, res) => {
       await logActivity(userId, "admin", "moderation_action", { actionType, reason });
       return json(res, 200, { ok: true });
     }
+	  
+    if (req.method === "GET" && url.pathname === "/db-test") {
+      try {
+        if (!db) {
+          return json(res, 500, { error: "Database not configured" });
+        }
+
+        const [rows] = await db.execute(`SELECT id, email FROM users LIMIT 5`);
+        return json(res, 200, { ok: true, rows });
+      } catch (e) {
+        console.error("DB TEST ERROR:", e);
+        return json(res, 500, {
+          error: "DB test failed",
+          details: e && e.message ? e.message : String(e)
+        });
+      }
+    }	  
 
     return text(res, 404, "Not Found");
   } catch (e) {
