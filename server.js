@@ -146,85 +146,133 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && url.pathname === "/nda-sign") {
-      const body = await readJsonBody(req);
-
-      const name = String(body.name || "").trim();
-      const email = String(body.email || "").trim();
-      const phone = String(body.phone || "").trim();
-      const signature = String(body.signature || "").trim();
-      const accepted = body.accepted === true;
-      const preferredLanguage = String(body.preferredLanguage || "").trim();
-      const accessibilityMode = body.accessibilityMode === true ? 1 : 0;
-
-      if (!name || !email || !phone || !signature || !accepted) {
-        return json(res, 400, { error: "Missing required NDA fields" });
-      }
-
-      if (!db) {
-        return json(res, 500, { error: "Database not configured" });
-      }
-
-      const signedAt = new Date();
-      let userId = null;
-
-      const [existingRows] = await db.execute(
-        `SELECT id FROM users WHERE email = ? LIMIT 1`,
-        [email]
-      );
-
-      if (existingRows.length) {
-        userId = existingRows[0].id;
-        await db.execute(
-          `UPDATE users
-           SET full_name = ?, phone = ?, nda_signed_at = ?, nda_signature_name = ?, preferred_language = COALESCE(NULLIF(?, ''), preferred_language), accessibility_mode = ?
-           WHERE id = ?`,
-          [name, phone, signedAt, signature, preferredLanguage, accessibilityMode, userId]
-        );
-      } else {
-        const [insertResult] = await db.execute(
-          `INSERT INTO users (full_name, email, phone, preferred_language, nda_signed_at, nda_signature_name, accessibility_mode, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
-          [name, email, phone, preferredLanguage || null, signedAt, signature, accessibilityMode]
-        );
-        userId = insertResult.insertId;
-      }
-
-      await db.execute(
-        `INSERT INTO nda_signatures (user_id, nda_version, accepted, signature_name, signed_at, ip_address, confirmation_email_sent)
-         VALUES (?, '1.0', 1, ?, ?, ?, 0)`,
-        [
-          userId,
-          signature,
-          signedAt,
-          req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown"
-        ]
-      );
-
       try {
-        await sendNdaConfirmationEmail({
-          name: name,
-          email: email,
-          phone: phone,
-          signedAt: signedAt.toISOString()
+        const body = await readJsonBody(req);
+        console.log("NDA BODY:", body);
+
+        const name = String(body.name || "").trim();
+        const email = String(body.email || "").trim();
+        const phone = String(body.phone || "").trim();
+        const signature = String(body.signature || "").trim();
+        const accepted = body.accepted === true;
+        const preferredLanguage = String(body.preferredLanguage || "").trim();
+        const accessibilityMode = body.accessibilityMode === true ? 1 : 0;
+
+        if (!name || !email || !phone || !signature || !accepted) {
+          return json(res, 400, { error: "Missing required NDA fields" });
+        }
+
+        if (!db) {
+          return json(res, 500, { error: "Database not configured" });
+        }
+
+        const signedAt = new Date();
+        let userId = null;
+
+        console.log("STEP 1: lookup user");
+        const [existingRows] = await db.execute(
+          `SELECT id FROM users WHERE email = ? LIMIT 1`,
+          [email]
+        );
+
+        console.log("STEP 2: existingRows =", existingRows);
+
+        if (existingRows.length) {
+          userId = existingRows[0].id;
+          console.log("STEP 3: updating existing user", userId);
+
+          await db.execute(
+            `UPDATE users
+             SET full_name = ?, phone = ?, nda_signed_at = ?, nda_signature_name = ?, preferred_language = COALESCE(NULLIF(?, ''), preferred_language), accessibility_mode = ?
+             WHERE id = ?`,
+            [name, phone, signedAt, signature, preferredLanguage, accessibilityMode, userId]
+          );
+        } else {
+          console.log("STEP 3: inserting new user");
+
+          const [insertResult] = await db.execute(
+            `INSERT INTO users (full_name, email, phone, preferred_language, nda_signed_at, nda_signature_name, accessibility_mode, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
+            [name, email, phone, preferredLanguage || null, signedAt, signature, accessibilityMode]
+          );
+
+          userId = insertResult.insertId;
+          console.log("STEP 4: inserted userId =", userId);
+        }
+
+        console.log("STEP 5: insert nda_signatures");
+        await db.execute(
+          `INSERT INTO nda_signatures (user_id, nda_version, accepted, signature_name, signed_at, ip_address, confirmation_email_sent)
+           VALUES (?, '1.0', 1, ?, ?, ?, 0)`,
+          [
+            userId,
+            signature,
+            signedAt,
+            req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown"
+          ]
+        );
+
+        console.log("STEP 6: insert terms_acceptance");
+        await db.execute(
+          `INSERT INTO terms_acceptance (user_id, terms_version)
+           VALUES (?, '1.0')`,
+          [userId]
+        );
+
+        console.log("STEP 7: upsert email_subscribers");
+        await db.execute(
+          `INSERT INTO email_subscribers (user_id, email, full_name, subscribed, source)
+           VALUES (?, ?, ?, 1, 'babelon-nda')
+           ON DUPLICATE KEY UPDATE full_name = VALUES(full_name), subscribed = 1, updated_at = CURRENT_TIMESTAMP`,
+          [userId, email, name]
+        );
+
+        let emailSent = false;
+
+        try {
+          console.log("STEP 8: sending email");
+          await sendNdaConfirmationEmail({
+            name,
+            email,
+            phone,
+            signedAt: signedAt.toISOString()
+          });
+
+          emailSent = true;
+
+          await db.execute(
+            `UPDATE nda_signatures
+             SET confirmation_email_sent = 1
+             WHERE user_id = ?
+             ORDER BY id DESC
+             LIMIT 1`,
+            [userId]
+          );
+        } catch (e) {
+          console.error("SMTP ERROR:", e);
+        }
+
+        console.log("STEP 9: log activity");
+        await logActivity(userId, body.sessionToken || "anonymous", "nda_signed", {
+          email,
+          name,
+          emailSent
+        });
+
+        console.log("STEP 10: success");
+        return json(res, 200, {
+          ok: true,
+          message: emailSent ? "NDA signed and confirmation email sent" : "NDA signed, but confirmation email failed",
+          userId,
+          emailSent
         });
       } catch (e) {
-        console.error("SMTP ERROR:", e);
+        console.error("NDA ROUTE ERROR:", e);
         return json(res, 500, {
-          error: "NDA saved but email failed",
-          details: e.message
+          error: "NDA route failed",
+          details: e && e.message ? e.message : String(e)
         });
       }
-
-      await logActivity(userId, body.sessionToken || "anonymous", "nda_signed", {
-        email: email,
-        name: name
-      });
-
-      return json(res, 200, {
-        ok: true,
-        message: "NDA signed and confirmation email sent",
-        userId: userId
-      });
     }
 
     if (req.method === "POST" && url.pathname === "/save-language") {
@@ -310,8 +358,11 @@ const server = http.createServer(async (req, res) => {
 
     return text(res, 404, "Not Found");
   } catch (e) {
-    console.error("SERVER ERROR:", e);
-    return text(res, 500, "Server error");
+    console.error("SERVER ERROR FULL:", e);
+    return json(res, 500, {
+      error: "Server error",
+      details: e && e.message ? e.message : String(e)
+    });
   }
 });
 
@@ -323,7 +374,12 @@ wss.on("connection", (ws) => {
 
   ws.on("message", (buf) => {
     let msg;
-    try { msg = JSON.parse(buf.toString()); } catch { return; }
+    try {
+      msg = JSON.parse(buf.toString());
+    } catch {
+      return;
+    }
+
     if (!msg || !msg.type) return;
 
     if (msg.type === "join") {
@@ -335,6 +391,7 @@ wss.on("connection", (ws) => {
       ws.role = role;
 
       if (!rooms.has(room)) rooms.set(room, { host: null, guest: null });
+
       const entry = rooms.get(room);
       entry[role] = ws;
 
