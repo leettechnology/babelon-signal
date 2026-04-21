@@ -6,16 +6,25 @@ import mysql from "mysql2/promise";
 
 const PORT = process.env.PORT || 8080;
 
-const db = mysql.createPool({
-  host: process.env.DB_HOST,
-  port: Number(process.env.DB_PORT || 3306),
-  user: process.env.DB_USER,
-  password: process.env.DB_PASS,
-  database: process.env.DB_NAME,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-});
+let db = null;
+
+async function initDb() {
+  try {
+    db = mysql.createPool({
+      host: process.env.DB_HOST,
+      port: Number(process.env.DB_PORT || 3306),
+      user: process.env.DB_USER,
+      password: process.env.DB_PASS,
+      database: process.env.DB_NAME,
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0
+    });
+    console.log("Database pool initialized");
+  } catch (e) {
+    console.error("DB INIT ERROR:", e);
+  }
+}
 
 const rooms = new Map();
 
@@ -47,15 +56,6 @@ function text(res, statusCode, msg) {
   res.end(msg);
 }
 
-function escapeHtml(str) {
-  return String(str || "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
 async function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -79,22 +79,10 @@ function buildNdaEmailHtml(payload) {
     <div style="font-family:Arial,Helvetica,sans-serif;color:#111;line-height:1.5">
       <h2>BabelOn NDA Confirmation</h2>
       <p>This confirms your electronic acceptance of the BabelOn tester NDA.</p>
-
-      <p><strong>Name:</strong> ${escapeHtml(payload.name)}</p>
-      <p><strong>Email:</strong> ${escapeHtml(payload.email)}</p>
-      <p><strong>Phone:</strong> ${escapeHtml(payload.phone)}</p>
-      <p><strong>Signed At:</strong> ${escapeHtml(payload.signedAt)}</p>
-
-      <h3>Tester Conduct Rules</h3>
-      <ul>
-        <li>No nudity or sexually explicit content</li>
-        <li>No bullying, threats, harassment, or hate</li>
-        <li>No child sexual abuse material or exploitative content</li>
-        <li>No illegal activity, impersonation, or fraud</li>
-        <li>No sharing of confidential non-public BabelOn information without permission</li>
-      </ul>
-
-      <p>BabelOn may suspend, ban, or remove testers who violate these rules or the terms.</p>
+      <p><strong>Name:</strong> ${String(payload.name || "")}</p>
+      <p><strong>Email:</strong> ${String(payload.email || "")}</p>
+      <p><strong>Phone:</strong> ${String(payload.phone || "")}</p>
+      <p><strong>Signed At:</strong> ${String(payload.signedAt || "")}</p>
     </div>
   `;
 }
@@ -119,6 +107,7 @@ async function sendNdaConfirmationEmail(payload) {
 }
 
 async function logActivity(userId, sessionToken, eventType, details) {
+  if (!db) return;
   await db.execute(
     `INSERT INTO activity_sessions (user_id, session_token, event_type, details)
      VALUES (?, ?, ?, ?)`,
@@ -171,6 +160,10 @@ const server = http.createServer(async (req, res) => {
         return json(res, 400, { error: "Missing required NDA fields" });
       }
 
+      if (!db) {
+        return json(res, 500, { error: "Database not configured" });
+      }
+
       const signedAt = new Date();
       let userId = null;
 
@@ -207,35 +200,13 @@ const server = http.createServer(async (req, res) => {
         ]
       );
 
-      await db.execute(
-        `INSERT INTO terms_acceptance (user_id, terms_version)
-         VALUES (?, '1.0')`,
-        [userId]
-      );
-
-      await db.execute(
-        `INSERT INTO email_subscribers (user_id, email, full_name, subscribed, source)
-         VALUES (?, ?, ?, 1, 'babelon-nda')
-         ON DUPLICATE KEY UPDATE full_name = VALUES(full_name), subscribed = 1, updated_at = CURRENT_TIMESTAMP`,
-        [userId, email, name]
-      );
-
       try {
         await sendNdaConfirmationEmail({
-          name,
-          email,
-          phone,
+          name: name,
+          email: email,
+          phone: phone,
           signedAt: signedAt.toISOString()
         });
-
-        await db.execute(
-          `UPDATE nda_signatures
-           SET confirmation_email_sent = 1
-           WHERE user_id = ?
-           ORDER BY id DESC
-           LIMIT 1`,
-          [userId]
-        );
       } catch (e) {
         console.error("SMTP ERROR:", e);
         return json(res, 500, {
@@ -245,14 +216,14 @@ const server = http.createServer(async (req, res) => {
       }
 
       await logActivity(userId, body.sessionToken || "anonymous", "nda_signed", {
-        email,
-        name
+        email: email,
+        name: name
       });
 
       return json(res, 200, {
         ok: true,
         message: "NDA signed and confirmation email sent",
-        userId
+        userId: userId
       });
     }
 
@@ -263,6 +234,10 @@ const server = http.createServer(async (req, res) => {
 
       if (!email || !preferredLanguage) {
         return json(res, 400, { error: "Missing email or language" });
+      }
+
+      if (!db) {
+        return json(res, 500, { error: "Database not configured" });
       }
 
       await db.execute(
@@ -289,11 +264,16 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && url.pathname === "/admin-users") {
+      if (!db) {
+        return json(res, 500, { error: "Database not configured" });
+      }
+
       const [rows] = await db.execute(
         `SELECT id, full_name, email, phone, preferred_language, status, nda_signed_at, accessibility_mode, created_at
          FROM users
          ORDER BY created_at DESC`
       );
+
       return json(res, 200, { users: rows });
     }
 
@@ -307,6 +287,10 @@ const server = http.createServer(async (req, res) => {
         return json(res, 400, { error: "Missing moderation fields" });
       }
 
+      if (!db) {
+        return json(res, 500, { error: "Database not configured" });
+      }
+
       let newStatus = "active";
       if (actionType === "suspend") newStatus = "suspended";
       if (actionType === "ban") newStatus = "banned";
@@ -314,7 +298,6 @@ const server = http.createServer(async (req, res) => {
       if (actionType === "restore") newStatus = "active";
 
       await db.execute(`UPDATE users SET status = ? WHERE id = ?`, [newStatus, userId]);
-
       await db.execute(
         `INSERT INTO moderation_actions (user_id, action_type, reason, admin_note)
          VALUES (?, ?, ?, ?)`,
@@ -340,12 +323,7 @@ wss.on("connection", (ws) => {
 
   ws.on("message", (buf) => {
     let msg;
-    try {
-      msg = JSON.parse(buf.toString());
-    } catch {
-      return;
-    }
-
+    try { msg = JSON.parse(buf.toString()); } catch { return; }
     if (!msg || !msg.type) return;
 
     if (msg.type === "join") {
@@ -357,7 +335,6 @@ wss.on("connection", (ws) => {
       ws.role = role;
 
       if (!rooms.has(room)) rooms.set(room, { host: null, guest: null });
-
       const entry = rooms.get(room);
       entry[role] = ws;
 
@@ -399,6 +376,8 @@ wss.on("connection", (ws) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log("BabelOn signaling server listening on", PORT);
+initDb().then(() => {
+  server.listen(PORT, () => {
+    console.log("BabelOn signaling server listening on", PORT);
+  });
 });
