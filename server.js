@@ -5,7 +5,7 @@ const WebSocket = require("ws");
 const app = express();
 
 app.get("/", (req, res) => {
-  res.json({ ok: true, service: "BabelOn signaling server", version: "production-call-v2" });
+  res.json({ ok: true, service: "BabelOn signaling server", version: "recall-emoji-fix-v3" });
 });
 
 app.get("/ice", (req, res) => {
@@ -26,9 +26,11 @@ function send(ws, data) {
 }
 
 function joinRoom(ws, room) {
+  if (ws.room && ws.room !== room) leaveRoom(ws);
   ws.room = room;
   if (!rooms.has(room)) rooms.set(room, new Set());
   const clients = rooms.get(room);
+
   clients.forEach(client => send(client, { type: "peer", status: "joined", room }));
   clients.add(ws);
   send(ws, { type: "joined", room, peers: clients.size - 1 });
@@ -41,6 +43,7 @@ function leaveRoom(ws) {
   clients.delete(ws);
   clients.forEach(client => send(client, { type: "peer", status: "left", room }));
   if (clients.size === 0) rooms.delete(room);
+  ws.room = null;
 }
 
 function relay(ws, msg) {
