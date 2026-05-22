@@ -5,7 +5,7 @@ const WebSocket = require("ws");
 const app = express();
 
 app.get("/", (req, res) => {
-  res.json({ ok: true, service: "BabelOn signaling server", version: "emoji-sticker-fix-v4" });
+  res.json({ ok: true, service: "BabelOn signaling server", version: "mic-translation-fix-v6" });
 });
 
 app.get("/ice", (req, res) => {
@@ -66,7 +66,7 @@ wss.on("connection", ws => {
       return;
     }
 
-    if (["ready","offer","answer","ice","caption","emoji","hello"].includes(msg.type)) {
+    if (["ready","offer","answer","ice","caption","emoji","hello","audio-check"].includes(msg.type)) {
       relay(ws, msg);
     }
   });
